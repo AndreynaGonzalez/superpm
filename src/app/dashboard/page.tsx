@@ -83,7 +83,7 @@ export default function DashboardPage() {
     ticketUrl: "",
   });
 
-  // Analizar ticket
+  // Analizar ticket: Jira real → IA
   const handleAnalyze = async () => {
     if (!ticketKey.trim()) return;
     setLoading(true);
@@ -91,15 +91,37 @@ export default function DashboardPage() {
     setResult(null);
 
     try {
+      // 1. Intentar traer datos reales de Jira
+      let ticketData = {
+        key: ticketKey.toUpperCase(),
+        title: `Ticket ${ticketKey.toUpperCase()}`,
+        description: `Análisis solicitado para el ticket ${ticketKey.toUpperCase()} desde SuperPM.`,
+        comments: [] as string[],
+      };
+
+      const jiraRes = await fetch("/api/jira/fetch-ticket", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ticketId: ticketKey.toUpperCase() }),
+      });
+
+      if (jiraRes.ok) {
+        const jiraData = await jiraRes.json();
+        ticketData = {
+          key: jiraData.ticket.key,
+          title: jiraData.ticket.title,
+          description: jiraData.ticket.description,
+          comments: jiraData.ticket.comments ?? [],
+        };
+      }
+      // Si Jira falla, seguimos con datos genéricos para que la demo no se rompa
+
+      // 2. Enviar a la IA con los datos reales
       const res = await fetch("/api/ai/analyze", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          ticket: {
-            key: ticketKey.toUpperCase(),
-            title: `Ticket ${ticketKey.toUpperCase()}`,
-            description: `Análisis solicitado para el ticket ${ticketKey.toUpperCase()} desde el dashboard de SuperPM. Generar análisis completo con los 6 pilares.`,
-          },
+          ticket: ticketData,
           designSystem: {
             primary_color: "#7C3AED",
             success_color: "#10B981",
