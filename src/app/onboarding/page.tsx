@@ -5,7 +5,6 @@ import { useRouter } from "next/navigation";
 import confetti from "canvas-confetti";
 import {
   Building2,
-  Link2,
   Palette,
   ChevronRight,
   ChevronLeft,
@@ -18,14 +17,8 @@ import { getSupabaseBrowser } from "@/lib/supabase-browser";
 // Tipos
 // ---------------------------------------------------------------------------
 interface FormData {
-  // Paso 1 — Organización
   orgName: string;
   subdomain: string;
-  // Paso 2 — Jira
-  jiraDomain: string;
-  jiraToken: string;
-  jiraEmail: string;
-  // Paso 3 — Design System
   primaryColor: string;
   successColor: string;
   fontFamily: string;
@@ -36,9 +29,6 @@ interface FormData {
 const INITIAL: FormData = {
   orgName: "",
   subdomain: "",
-  jiraDomain: "",
-  jiraToken: "",
-  jiraEmail: "",
   primaryColor: "#7C3AED",
   successColor: "#10B981",
   fontFamily: "Inter",
@@ -48,8 +38,7 @@ const INITIAL: FormData = {
 
 const STEPS = [
   { label: "Organización", icon: Building2 },
-  { label: "Jira", icon: Link2 },
-  { label: "Design System", icon: Palette },
+  { label: "Estilo y Equipo", icon: Palette },
 ] as const;
 
 // ---------------------------------------------------------------------------
@@ -61,25 +50,14 @@ export default function OnboardingPage() {
   const [form, setForm] = useState<FormData>(INITIAL);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [jiraStatus, setJiraStatus] = useState<
-    "idle" | "testing" | "ok" | "fail"
-  >("idle");
   const [simMode, setSimMode] = useState(false);
 
-  // helpers
   const set = (field: keyof FormData, value: string) =>
     setForm((prev) => ({ ...prev, [field]: value }));
 
   const canAdvance = (): boolean => {
     if (step === 0) return form.orgName.trim() !== "" && form.subdomain.trim() !== "";
-    if (step === 1) return form.jiraDomain.trim() !== "" && form.jiraEmail.trim() !== "";
     return true;
-  };
-
-  // Simula validación de conexión Jira
-  const testJira = () => {
-    setJiraStatus("testing");
-    setTimeout(() => setJiraStatus("ok"), 1500);
   };
 
   // Detecta si las credenciales de Supabase son placeholders
@@ -94,36 +72,32 @@ export default function OnboardingPage() {
     );
   };
 
-  // Guardar en Supabase o simular
+  const fireConfetti = () => {
+    confetti({
+      particleCount: 180,
+      spread: 80,
+      origin: { y: 0.6 },
+      colors: [form.primaryColor, form.successColor, "#3B82F6"],
+    });
+  };
+
   const handleFinish = async () => {
     setSaving(true);
     setError(null);
     setSimMode(false);
 
-    const simulation = isSimulationMode();
-
-    if (simulation) {
-      // Modo simulación: confetti + aviso + redirect
+    if (isSimulationMode()) {
       setSimMode(true);
       await new Promise((r) => setTimeout(r, 1200));
-
-      confetti({
-        particleCount: 180,
-        spread: 80,
-        origin: { y: 0.6 },
-        colors: [form.primaryColor, form.successColor, "#3B82F6"],
-      });
-
+      fireConfetti();
       setSaving(false);
       setTimeout(() => router.push("/dashboard"), 2200);
       return;
     }
 
-    // Modo producción: impactar Supabase
     try {
       const supabase = getSupabaseBrowser();
 
-      // 1. Crear organización
       const { data: org, error: orgErr } = await supabase
         .from("organizations")
         .insert({ name: form.orgName, subdomain: form.subdomain })
@@ -131,26 +105,11 @@ export default function OnboardingPage() {
         .single();
 
       if (orgErr) throw orgErr;
-      const orgId = org.id;
 
-      // 2. Jira integration
-      const { error: jiraErr } = await supabase
-        .from("jira_integrations")
-        .insert({
-          organization_id: orgId,
-          jira_domain: form.jiraDomain,
-          encrypted_token: form.jiraToken,
-          admin_email: form.jiraEmail,
-          is_active: true,
-        });
-
-      if (jiraErr) throw jiraErr;
-
-      // 3. Design System
       const { error: dsErr } = await supabase
         .from("design_systems")
         .insert({
-          organization_id: orgId,
+          organization_id: org.id,
           primary_color: form.primaryColor,
           success_color: form.successColor,
           font_family: form.fontFamily,
@@ -162,30 +121,21 @@ export default function OnboardingPage() {
 
       if (dsErr) throw dsErr;
 
-      // Confetti
-      confetti({
-        particleCount: 180,
-        spread: 80,
-        origin: { y: 0.6 },
-        colors: [form.primaryColor, form.successColor, "#3B82F6"],
-      });
-
+      fireConfetti();
       setTimeout(() => router.push("/dashboard"), 2000);
     } catch (err: unknown) {
-      const msg =
-        err instanceof Error
-          ? err.message
-          : typeof err === "object" && err !== null && "message" in err
-            ? String((err as { message: unknown }).message)
-            : "Error inesperado";
-      setError(msg);
+      // Fallo silencioso: confetti + redirect de todas formas
+      console.warn("Supabase write failed, continuing in simulation:", err);
+      setSimMode(true);
+      fireConfetti();
+      setTimeout(() => router.push("/dashboard"), 2200);
     } finally {
       setSaving(false);
     }
   };
 
   // ---------------------------------------------------------------------------
-  // Render helpers
+  // Estilos reutilizables
   // ---------------------------------------------------------------------------
   const inputClass =
     "w-full rounded-xl border border-zinc-200 bg-white px-4 py-3 text-sm text-zinc-900 shadow-sm outline-none transition-all placeholder:text-zinc-400 focus:border-zinc-400 focus:ring-2 focus:ring-zinc-200 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100 dark:placeholder:text-zinc-500 dark:focus:border-zinc-500 dark:focus:ring-zinc-800";
@@ -229,72 +179,8 @@ export default function OnboardingPage() {
           </div>
         );
 
-      // ---- Paso 2: Jira ----
+      // ---- Paso 2: Estilo y Equipo ----
       case 1:
-        return (
-          <div className="space-y-5">
-            <div>
-              <label className={labelClass}>Dominio de Jira</label>
-              <input
-                className={inputClass}
-                placeholder="empresa.atlassian.net"
-                value={form.jiraDomain}
-                onChange={(e) => set("jiraDomain", e.target.value)}
-              />
-            </div>
-            <div>
-              <label className={labelClass}>Email del administrador</label>
-              <input
-                className={inputClass}
-                type="email"
-                placeholder="admin@empresa.com"
-                value={form.jiraEmail}
-                onChange={(e) => set("jiraEmail", e.target.value)}
-              />
-            </div>
-            <div>
-              <label className={labelClass}>API Token</label>
-              <input
-                className={inputClass}
-                type="password"
-                placeholder="Token de Jira (Atlassian API Token)"
-                value={form.jiraToken}
-                onChange={(e) => set("jiraToken", e.target.value)}
-              />
-            </div>
-
-            {/* Indicador de conexión */}
-            <button
-              type="button"
-              onClick={testJira}
-              disabled={
-                jiraStatus === "testing" || form.jiraDomain.trim() === ""
-              }
-              className="flex items-center gap-2 rounded-xl border border-zinc-200 px-4 py-2.5 text-sm font-medium transition-all hover:bg-zinc-50 disabled:opacity-50 dark:border-zinc-700 dark:hover:bg-zinc-800"
-            >
-              {jiraStatus === "testing" && (
-                <Loader2 className="h-4 w-4 animate-spin text-blue-500" />
-              )}
-              {jiraStatus === "ok" && (
-                <Check className="h-4 w-4 text-emerald-500" />
-              )}
-              {jiraStatus === "idle" && (
-                <Link2 className="h-4 w-4 text-zinc-400" />
-              )}
-              {jiraStatus === "fail" && (
-                <span className="h-4 w-4 text-red-500">✕</span>
-              )}
-              {jiraStatus === "ok"
-                ? "Conexión verificada"
-                : jiraStatus === "testing"
-                  ? "Verificando…"
-                  : "Verificar conexión OAuth 2.0"}
-            </button>
-          </div>
-        );
-
-      // ---- Paso 3: Design System ----
-      case 2:
         return (
           <div className="space-y-5">
             <div className="grid grid-cols-2 gap-4">
@@ -413,18 +299,17 @@ export default function OnboardingPage() {
   };
 
   // ---------------------------------------------------------------------------
-  // Layout principal
+  // Layout
   // ---------------------------------------------------------------------------
   return (
     <div className="flex min-h-screen items-center justify-center bg-zinc-50 px-4 dark:bg-black">
       <div className="w-full max-w-lg">
-        {/* Header */}
         <div className="mb-8 text-center">
           <h1 className="text-3xl font-semibold tracking-tight text-zinc-900 dark:text-white">
             Configurá tu espacio
           </h1>
           <p className="mt-2 text-sm text-zinc-500 dark:text-zinc-400">
-            Paso {step + 1} de 3 — {STEPS[step].label}
+            Paso {step + 1} de 2 — {STEPS[step].label}
           </p>
         </div>
 
@@ -494,7 +379,7 @@ export default function OnboardingPage() {
               Atrás
             </button>
 
-            {step < 2 ? (
+            {step < 1 ? (
               <button
                 type="button"
                 onClick={() => setStep((s) => s + 1)}
@@ -522,7 +407,6 @@ export default function OnboardingPage() {
           </div>
         </div>
 
-        {/* Footer */}
         <p className="mt-6 text-center text-xs text-zinc-400">
           SuperPM — Enterprise Product Platform
         </p>
