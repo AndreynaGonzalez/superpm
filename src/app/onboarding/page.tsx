@@ -64,6 +64,7 @@ export default function OnboardingPage() {
   const [jiraStatus, setJiraStatus] = useState<
     "idle" | "testing" | "ok" | "fail"
   >("idle");
+  const [simMode, setSimMode] = useState(false);
 
   // helpers
   const set = (field: keyof FormData, value: string) =>
@@ -81,11 +82,44 @@ export default function OnboardingPage() {
     setTimeout(() => setJiraStatus("ok"), 1500);
   };
 
-  // Guardar todo en Supabase
+  // Detecta si las credenciales de Supabase son placeholders
+  const isSimulationMode = (): boolean => {
+    const anonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ?? "";
+    const url = process.env.NEXT_PUBLIC_SUPABASE_URL ?? "";
+    return (
+      !url ||
+      !anonKey ||
+      anonKey.includes("example_key_placeholder") ||
+      anonKey === "TU_ANON_KEY_ACA"
+    );
+  };
+
+  // Guardar en Supabase o simular
   const handleFinish = async () => {
     setSaving(true);
     setError(null);
+    setSimMode(false);
 
+    const simulation = isSimulationMode();
+
+    if (simulation) {
+      // Modo simulación: confetti + aviso + redirect
+      setSimMode(true);
+      await new Promise((r) => setTimeout(r, 1200));
+
+      confetti({
+        particleCount: 180,
+        spread: 80,
+        origin: { y: 0.6 },
+        colors: [form.primaryColor, form.successColor, "#3B82F6"],
+      });
+
+      setSaving(false);
+      setTimeout(() => router.push("/dashboard"), 2200);
+      return;
+    }
+
+    // Modo producción: impactar Supabase
     try {
       const supabase = getSupabaseBrowser();
 
@@ -168,7 +202,7 @@ export default function OnboardingPage() {
               <label className={labelClass}>Nombre de la empresa</label>
               <input
                 className={inputClass}
-                placeholder="Ej: MetaFar S.A."
+                placeholder="Ej: Acme Corp"
                 value={form.orgName}
                 onChange={(e) => set("orgName", e.target.value)}
               />
@@ -178,7 +212,7 @@ export default function OnboardingPage() {
               <div className="flex items-center gap-2">
                 <input
                   className={inputClass}
-                  placeholder="metafar"
+                  placeholder="acme"
                   value={form.subdomain}
                   onChange={(e) =>
                     set(
@@ -368,7 +402,7 @@ export default function OnboardingPage() {
               </label>
               <textarea
                 className={inputClass + " min-h-[140px] resize-y"}
-                placeholder={`Pegá acá la terminología, reglas de negocio o contexto que la IA debe conocer.\n\nEj:\n- "Dispensa" = entrega de medicamento al paciente\n- "Receta electrónica" = prescripción digital validada por ANMAT\n- Las historias deben considerar siempre la trazabilidad SNVS`}
+                placeholder={`Pegá acá la terminología, reglas de negocio o contexto que la IA debe conocer.\n\nEj:\n- "SaaS" = Software como Servicio\n- "Churn" = tasa de cancelación de suscripciones\n- Las historias deben considerar siempre la accesibilidad WCAG 2.1`}
                 value={form.customRules}
                 onChange={(e) => set("customRules", e.target.value)}
               />
@@ -430,6 +464,17 @@ export default function OnboardingPage() {
         {/* Card */}
         <div className="rounded-2xl border border-zinc-200 bg-white p-8 shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
           {renderStep()}
+
+          {simMode && (
+            <div className="mt-4 rounded-lg bg-blue-50 px-4 py-3 dark:bg-blue-950/40">
+              <p className="text-sm font-medium text-blue-700 dark:text-blue-300">
+                Detectamos que estás en modo local/prueba.
+              </p>
+              <p className="mt-0.5 text-sm text-blue-600 dark:text-blue-400">
+                Conectando en modo simulación... Redirigiendo al Dashboard.
+              </p>
+            </div>
+          )}
 
           {error && (
             <p className="mt-4 rounded-lg bg-red-50 px-3 py-2 text-sm text-red-600 dark:bg-red-950 dark:text-red-400">
