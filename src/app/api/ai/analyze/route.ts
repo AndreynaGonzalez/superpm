@@ -1,4 +1,5 @@
 import { NextRequest } from "next/server";
+import { getSupabaseServer } from "@/lib/supabase-server";
 
 // ---------------------------------------------------------------------------
 // Cascada de modelos (Fallback Resilience)
@@ -22,7 +23,9 @@ interface AnalyzeRequest {
     acceptance_criteria?: string;
     comments?: string[];
   };
-  designSystem: {
+  organizationId?: string;
+  // Fallback manual si no hay org en DB
+  designSystem?: {
     primary_color: string;
     success_color: string;
     font_family: string;
@@ -30,6 +33,14 @@ interface AnalyzeRequest {
     custom_rules?: Record<string, unknown>;
   };
   organizationName?: string;
+}
+
+interface DesignSystemData {
+  primary_color: string;
+  success_color: string;
+  font_family: string;
+  border_radius: string;
+  custom_rules: Record<string, unknown>;
 }
 
 interface AnalyzeOutput {
@@ -44,9 +55,13 @@ interface AnalyzeOutput {
 // ---------------------------------------------------------------------------
 // Prompt de sistema
 // ---------------------------------------------------------------------------
-function buildSystemPrompt(req: AnalyzeRequest): string {
-  const ds = req.designSystem;
+function buildSystemPrompt(
+  ds: DesignSystemData,
+  orgName?: string
+): string {
   return `Eres SuperPM, un motor de inteligencia artificial de nivel enterprise para Product Managers.
+${orgName ? `\nEstás analizando un ticket de la organización "${orgName}".` : ""}
+${ds.custom_rules && Object.keys(ds.custom_rules).length > 0 ? `\nContexto de negocio y terminología de esta organización:\n${JSON.stringify(ds.custom_rules)}` : ""}
 
 Tu tarea: analizar el ticket de Jira proporcionado y devolver EXCLUSIVAMENTE un objeto JSON válido (sin markdown, sin backticks, sin texto adicional) con estas 6 claves:
 
@@ -63,7 +78,6 @@ Tu tarea: analizar el ticket de Jira proporcionado y devolver EXCLUSIVAMENTE un 
    - Color de éxito: ${ds.success_color}
    - Tipografía: ${ds.font_family}
    - Border radius: ${ds.border_radius}
-   ${ds.custom_rules ? `- Reglas custom: ${JSON.stringify(ds.custom_rules)}` : ""}
 
 6. "metrics" (object): Un objeto con estas claves:
    - "happiness": métrica de satisfacción del usuario y cómo medirla.
@@ -75,23 +89,21 @@ Tu tarea: analizar el ticket de Jira proporcionado y devolver EXCLUSIVAMENTE un 
 RESPONDE SOLO CON EL JSON. Sin explicaciones, sin markdown.`;
 }
 
-function buildUserPrompt(req: AnalyzeRequest): string {
-  const t = req.ticket;
-  let prompt = `TICKET: ${t.key} — ${t.title}\n\nDESCRIPCIÓN:\n${t.description}`;
-  if (t.acceptance_criteria) {
-    prompt += `\n\nCRITERIOS DE ACEPTACIÓN EXISTENTES:\n${t.acceptance_criteria}`;
+function buildUserPrompt(
+  ticket: AnalyzeRequest["ticket"]
+): string {
+  let prompt = `TICKET: ${ticket.key} — ${ticket.title}\n\nDESCRIPCIÓN:\n${ticket.description}`;
+  if (ticket.acceptance_criteria) {
+    prompt += `\n\nCRITERIOS DE ACEPTACIÓN EXISTENTES:\n${ticket.acceptance_criteria}`;
   }
-  if (t.comments?.length) {
-    prompt += `\n\nCOMENTARIOS DEL EQUIPO:\n${t.comments.join("\n---\n")}`;
-  }
-  if (req.organizationName) {
-    prompt += `\n\nORGANIZACIÓN: ${req.organizationName}`;
+  if (ticket.comments?.length) {
+    prompt += `\n\nCOMENTARIOS DEL EQUIPO:\n${ticket.comments.join("\n---\n")}`;
   }
   return prompt;
 }
 
 // ---------------------------------------------------------------------------
-// Llamada a OpenRouter con un modelo específico
+// Llamada a OpenRouter (clave de plataforma fija, server-side)
 // ---------------------------------------------------------------------------
 async function callModel(
   model: string,
@@ -134,7 +146,6 @@ async function callModel(
     throw new Error(`OpenRouter ${model} devolvió respuesta vacía`);
   }
 
-  // Limpiar posibles backticks markdown que el modelo pueda agregar
   const cleaned = raw
     .replace(/^```(?:json)?\s*/i, "")
     .replace(/\s*```$/i, "")
@@ -142,7 +153,6 @@ async function callModel(
 
   const parsed: AnalyzeOutput = JSON.parse(cleaned);
 
-  // Validar que las 6 claves existan
   const requiredKeys: (keyof AnalyzeOutput)[] = [
     "summary",
     "mentor",
@@ -167,7 +177,6 @@ export async function POST(request: NextRequest) {
   try {
     const body: AnalyzeRequest = await request.json();
 
-    // Validación de entrada
     if (!body.ticket?.key || !body.ticket?.title || !body.ticket?.description) {
       return Response.json(
         { error: "Faltan campos obligatorios: ticket.key, ticket.title, ticket.description" },
@@ -175,15 +184,59 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    if (!body.designSystem) {
-      return Response.json(
-        { error: "Falta el objeto designSystem" },
-        { status: 400 }
-      );
+    // Resolver Design System dinámicamente desde la DB
+    let ds: DesignSystemData = {
+      primary_color: "#7C3AED",
+      success_color: "#10B981",
+      font_family: "Inter",
+      border_radius: "12px",
+      custom_rules: {},
+    };
+    let orgName: string | undefined = body.organizationName;
+
+    if (body.organizationId) {
+      const supabase = await getSupabaseServer();
+
+      // Design System de la organización
+      const { data: dsRow } = await supabase
+        .from("design_systems")
+        .select("primary_color, success_color, font_family, border_radius, custom_rules")
+        .eq("organization_id", body.organizationId)
+        .order("updated_at", { ascending: false })
+        .limit(1)
+        .single();
+
+      if (dsRow) {
+        ds = {
+          primary_color: dsRow.primary_color,
+          success_color: dsRow.success_color,
+          font_family: dsRow.font_family,
+          border_radius: dsRow.border_radius,
+          custom_rules: (dsRow.custom_rules as Record<string, unknown>) ?? {},
+        };
+      }
+
+      // Nombre de la organización para contexto
+      if (!orgName) {
+        const { data: orgRow } = await supabase
+          .from("organizations")
+          .select("name")
+          .eq("id", body.organizationId)
+          .single();
+
+        if (orgRow) orgName = orgRow.name;
+      }
+    } else if (body.designSystem) {
+      // Fallback: design system enviado desde el frontend
+      ds = {
+        ...ds,
+        ...body.designSystem,
+        custom_rules: body.designSystem.custom_rules ?? {},
+      };
     }
 
-    const systemPrompt = buildSystemPrompt(body);
-    const userPrompt = buildUserPrompt(body);
+    const systemPrompt = buildSystemPrompt(ds, orgName);
+    const userPrompt = buildUserPrompt(body.ticket);
 
     // Cascada secuencial de modelos
     const errors: string[] = [];
@@ -202,12 +255,8 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    // Todos los modelos fallaron
     return Response.json(
-      {
-        error: "Todos los modelos de la cascada fallaron",
-        details: errors,
-      },
+      { error: "Todos los modelos de la cascada fallaron", details: errors },
       { status: 502 }
     );
   } catch (err) {

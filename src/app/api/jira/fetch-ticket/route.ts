@@ -1,7 +1,8 @@
 import { NextRequest } from "next/server";
+import { getSupabaseServer } from "@/lib/supabase-server";
 
 // ---------------------------------------------------------------------------
-// Helpers para convertir ADF (Atlassian Document Format) a texto plano
+// ADF → texto plano
 // ---------------------------------------------------------------------------
 interface AdfNode {
   type: string;
@@ -12,16 +13,21 @@ interface AdfNode {
 function adfToText(node: AdfNode | undefined | null): string {
   if (!node) return "";
   if (node.text) return node.text;
-  if (node.content) return node.content.map(adfToText).join(node.type === "paragraph" ? "\n" : "");
+  if (node.content)
+    return node.content
+      .map(adfToText)
+      .join(node.type === "paragraph" ? "\n" : "");
   return "";
 }
 
 // ---------------------------------------------------------------------------
 // POST /api/jira/fetch-ticket
+// Recibe: { ticketId, organizationId }
+// Lee credenciales de jira_integrations por organization_id
 // ---------------------------------------------------------------------------
 export async function POST(request: NextRequest) {
   try {
-    const { ticketId } = await request.json();
+    const { ticketId, organizationId } = await request.json();
 
     if (!ticketId || typeof ticketId !== "string") {
       return Response.json(
@@ -30,27 +36,52 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const domain = process.env.JIRA_DOMAIN;
-    const email = process.env.JIRA_USER_EMAIL;
-    const token = process.env.JIRA_API_TOKEN;
-
-    // Diagnóstico de variables (token oculto por seguridad)
-    console.log("[Jira] JIRA_DOMAIN:", domain ?? "undefined");
-    console.log("[Jira] JIRA_USER_EMAIL:", email ?? "undefined");
-    console.log("[Jira] JIRA_API_TOKEN:", token ? `configurado (${token.length} chars)` : "undefined");
-
-    if (!domain || !email || !token) {
-      console.error("[Jira] Faltan credenciales. Abortando.");
+    if (!organizationId || typeof organizationId !== "string") {
       return Response.json(
-        { error: "Credenciales de Jira no configuradas en el servidor" },
-        { status: 500 }
+        { error: "Falta el campo organizationId" },
+        { status: 400 }
       );
     }
 
-    // Basic Auth en Base64 (server-side, nunca expuesto al frontend)
-    const auth = Buffer.from(`${email}:${token}`).toString("base64");
-    const url = `https://${domain}/rest/api/3/issue/${encodeURIComponent(ticketId)}?fields=summary,description,status,priority,assignee,comment`;
-    console.log("[Jira] Fetching:", url);
+    // Consulta dinámica: traer credenciales Jira de esta organización
+    const supabase = await getSupabaseServer();
+
+    const { data: jiraConfig, error: dbErr } = await supabase
+      .from("jira_integrations")
+      .select("jira_domain, encrypted_token, admin_email, is_active")
+      .eq("organization_id", organizationId)
+      .eq("is_active", true)
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .single();
+
+    if (dbErr || !jiraConfig) {
+      return Response.json(
+        {
+          error:
+            "No hay integración de Jira configurada para esta organización. Configurala en Integraciones.",
+        },
+        { status: 404 }
+      );
+    }
+
+    const { jira_domain, encrypted_token, admin_email } = jiraConfig;
+
+    if (!jira_domain || !encrypted_token || !admin_email) {
+      return Response.json(
+        { error: "La integración de Jira está incompleta. Revisá los datos en Integraciones." },
+        { status: 422 }
+      );
+    }
+
+    // Basic Auth con los datos de la organización
+    const auth = Buffer.from(`${admin_email}:${encrypted_token}`).toString(
+      "base64"
+    );
+
+    const url = `https://${jira_domain}/rest/api/3/issue/${encodeURIComponent(
+      ticketId
+    )}?fields=summary,description,status,priority,assignee,comment`;
 
     const res = await fetch(url, {
       headers: {
@@ -59,11 +90,8 @@ export async function POST(request: NextRequest) {
       },
     });
 
-    console.log("[Jira] Response status:", res.status);
-
     if (!res.ok) {
       const body = await res.text();
-      console.error("[Jira] Error body:", body);
       if (res.status === 404) {
         return Response.json(
           { error: `Ticket ${ticketId} no encontrado en Jira` },
@@ -72,7 +100,10 @@ export async function POST(request: NextRequest) {
       }
       if (res.status === 401 || res.status === 403) {
         return Response.json(
-          { error: `Credenciales de Jira inválidas o sin permisos (${res.status})` },
+          {
+            error:
+              "Credenciales de Jira inválidas o sin permisos. Actualizá el token en Integraciones.",
+          },
           { status: 401 }
         );
       }
@@ -85,12 +116,10 @@ export async function POST(request: NextRequest) {
     const data = await res.json();
     const fields = data.fields;
 
-    // Extraer descripción (ADF → texto plano)
     const description = adfToText(fields.description) || "Sin descripción";
 
-    // Extraer comentarios
     const comments: string[] = (fields.comment?.comments ?? [])
-      .slice(-5) // últimos 5 comentarios
+      .slice(-5)
       .map((c: { body?: AdfNode }) => adfToText(c.body))
       .filter((t: string) => t.length > 0);
 
